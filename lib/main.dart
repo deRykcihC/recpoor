@@ -96,6 +96,136 @@ class _MainScaffoldState extends State<MainScaffold> {
     super.initState();
     _pageController = PageController(initialPage: _selectedIndex);
     _loadUIState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkFirstTimeGuide());
+  }
+
+  OverlayEntry? _overlayEntry;
+  int _onboardingStep = 0; // 0: None, 1: Hiding, 2: Showing
+
+  Future<void> _checkFirstTimeGuide() async {
+    final prefs = await SharedPreferences.getInstance();
+    final bool guideShown = prefs.getBool('guide_hidden_ui_shown_v2') ?? false;
+
+    if (!guideShown && mounted) {
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) return;
+      
+      setState(() {
+        _onboardingStep = 1;
+      });
+      _showOverlay("Long press 'Record' to hide the header UI");
+    }
+  }
+
+  void _showOverlay(String text, {bool autoDismiss = false}) {
+    _removeOverlay();
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          // Block touches on the entire screen background
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () {}, // Absorb taps
+              behavior: HitTestBehavior.opaque,
+              child: Container(color: Colors.black.withOpacity(0.5)), // Dim background
+            ),
+          ),
+          Positioned(
+            bottom: 80, // Position above nav bar
+            left: 0,
+            right: 0,
+            child: Material(
+              color: Colors.transparent,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, // Allow manual positioning of arrow
+                children: [
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      margin: const EdgeInsets.symmetric(horizontal: 32),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.inverseSurface,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        text,
+                        style: TextStyle(color: Theme.of(context).colorScheme.onInverseSurface),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Align arrow to the first tab (25% of screen width)
+                  Padding(
+                    padding: EdgeInsets.only(left: MediaQuery.of(context).size.width * 0.25 - 16),
+                    child: Icon(Icons.arrow_downward, color: Theme.of(context).colorScheme.inverseSurface, size: 32),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // We need to let the BottomNavigationBar receive events.
+          // Since the overlay is on top, we usually can't.
+          // However, we can make the Overlay PASS THROUGH events in the specific region of the button.
+          // But that's hard with standard Flutter widgets without a custom RenderBox.
+          // ALTERNATIVE: Don't use a full-screen blocking overlay.
+          // Use AbsorbPointer on the Scaffold body (in build method) and ignore clicks on the other tab.
+          // For this specific request "user has to complete it", the dimming background is nice but blocking taps is key.
+          // NOTE: If I use a full screen stack in Overlay, it BLOCKS the bottom nav bar too!
+          // So I will NOT use the full screen blocker here, but rely on AbsorbPointer in the Scaffold body + logic in _changeTab.
+        ],
+      ),
+    );
+     
+    // Use the transparent version correctly
+     _overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        bottom: 80,
+        left: 0,
+        right: 0,
+        child: Material(
+          color: Colors.transparent,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                 child: Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.symmetric(horizontal: 32),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.inverseSurface,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    text,
+                    style: TextStyle(color: Theme.of(context).colorScheme.onInverseSurface),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: EdgeInsets.only(left: MediaQuery.of(context).size.width * 0.25 - 16),
+                 child: Icon(Icons.arrow_downward, color: Theme.of(context).colorScheme.inverseSurface, size: 32),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    
+    Overlay.of(context).insert(_overlayEntry!);
+    
+    if (autoDismiss) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) _removeOverlay();
+      });
+    }
+  }
+
+  void _removeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
   }
 
   Future<void> _loadUIState() async {
@@ -109,9 +239,32 @@ class _MainScaffoldState extends State<MainScaffold> {
   
   Future<void> _toggleUI() async {
     HapticFeedback.mediumImpact();
-    setState(() {
-      _showUI = !_showUI;
-    });
+    
+    // Onboarding Logic
+    if (_onboardingStep == 1) {
+       // User just hid it (supposedly)
+       setState(() {
+        _showUI = !_showUI; // Actually optimize the toggle
+        _onboardingStep = 2;
+       });
+       _showOverlay("Great! Now long press again to bring it back.");
+    } else if (_onboardingStep == 2) {
+      // User unhid it, finish
+      setState(() {
+        _showUI = !_showUI;
+        _onboardingStep = 0;
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('guide_hidden_ui_shown_v2', true);
+      
+      _showOverlay("You're all set! Long press anytime to toggle.", autoDismiss: true);
+    } else {
+      // Normal usage
+      setState(() {
+        _showUI = !_showUI;
+      });
+    }
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('show_header_ui', _showUI);
   }
@@ -125,6 +278,8 @@ class _MainScaffoldState extends State<MainScaffold> {
   bool _showUI = true;
 
   void _changeTab(int index) {
+    if (_onboardingStep > 0) return; // Block tab switching during onboarding
+
     setState(() {
       _selectedIndex = index;
     });
@@ -138,13 +293,16 @@ class _MainScaffoldState extends State<MainScaffold> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: PageView(
-        controller: _pageController,
-        physics: const NeverScrollableScrollPhysics(), // Prevent swiping to ensure navigation via bar
-        children: [
-          ScreenRecordPage(onTabChange: _changeTab, showUI: _showUI),
-          const FilesPage(),
-        ],
+      body: AbsorbPointer(
+        absorbing: _onboardingStep > 0,
+        child: PageView(
+          controller: _pageController,
+          physics: const NeverScrollableScrollPhysics(), // Prevent swiping to ensure navigation via bar
+          children: [
+            ScreenRecordPage(onTabChange: _changeTab, showUI: _showUI),
+            const FilesPage(),
+          ],
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         onDestinationSelected: _changeTab,
@@ -163,7 +321,7 @@ class _MainScaffoldState extends State<MainScaffold> {
             ),
             label: 'Record',
           ),
-          const NavigationDestination(
+          const NavigationDestination( // Wrap 2nd tab to allow blocking? _changeTab already blocks it.
             selectedIcon: Icon(Icons.folder_open_rounded),
             icon: Icon(Icons.folder_open_outlined),
             label: 'Recordings',
@@ -422,13 +580,63 @@ class _ScreenRecordPageState extends State<ScreenRecordPage> with WidgetsBinding
                 
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 12.0),
-                  child: Text(
-                    "RecPoor is designed for devices without a native screen recorder, featuring internal audio recording without Root. Unlike other apps, it is free from bloatware and ads, originally built for personal use. To support the project, please join the Play Store testing program or use the link above. Suggestions are welcome on GitHub. Enjoy!",
-                    textAlign: TextAlign.center,
-                    style: textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      height: 1.4,
-                    ),
+                  child: Column(
+                    children: [
+                      SelectableText(
+                        "RecPoor is designed for devices without a native screen recorder, featuring internal audio recording without Root. Unlike other apps, it is free from bloatware and ads. If you appreciate the idea and want to help keep the app available on the Play Store, you can donate via Buy Me a Coffee. Otherwise, it's always free on GitHub.",
+                        textAlign: TextAlign.center,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            "Have bugs, feedback or suggestions? Leave it in the ",
+                            textAlign: TextAlign.center,
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () => launchUrl(Uri.parse('https://github.com/deRykcihC/recpoor'), mode: LaunchMode.externalApplication),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
+                              child: Text(
+                                "GitHub repository",
+                                textAlign: TextAlign.center,
+                                style: textTheme.bodySmall?.copyWith(
+                                  color: colorScheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => launchUrl(Uri.parse('https://github.com/deRykcihC/recpoor/blob/main/PRIVACY_POLICY.md'), mode: LaunchMode.externalApplication),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                          child: Text(
+                            "Privacy Policy",
+                            textAlign: TextAlign.center,
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colorScheme.primary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
